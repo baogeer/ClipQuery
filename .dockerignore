@@ -1,0 +1,37 @@
+# 别把本地产物和开发副产物塞进构建上下文
+# 每一行都会影响 build 速度和镜像大小
+
+# 本地运行时数据（镜像内自己建、volume 挂载）
+news/
+data/
+
+# 开发配置（.env 通过 volume 挂进去，不打进镜像避免密钥泄漏）
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# 文档和 README 对构建无用（想要可去掉）
+docs/
+*.md
+
+# OS
+.DS_Store
+Thumbs.db

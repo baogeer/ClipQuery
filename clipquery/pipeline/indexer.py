@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import hashlib
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+from tqdm import tqdm
+
+from .. import cos as cos_client
+from ..config import settings
+from ..storage.article_store import get_article_store
+from ..storage.clip_store import get_clip_store
+from ..storage.vector_store import VectorStore
+from .clipper import Clip, cut_clips, find_clip_for_timestamp
+from .encoder import ClipEncoder, get_encoder
+from .extractor import Frame, iter_frames, save_thumbnail
+
+
+def _frame_id(video_path: str, frame_index: int) -> str:
+    h = hashlib.sha1(f"{video_path}:{frame_index}".encode("utf-8")).hexdigest()
+    return h[:20]
+
+
+def _batched(iterable: Iterable[Frame], size: int) -> Iterable[list[Frame]]:
+    buf: list[Frame] = []
+    for item in iterable:
+        buf.append(item)
+        if len(buf) >= size:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
+
+
+def _infer_article_id(video_path: str) -> str:
+    """约定：视频文件位于 news/<article_id>/video.mp4。"""
+    parent = Path(video_path).parent.name
+    return parent or Path(video_path).stem
+
+
+def _process_clips(
+    video_path: Path,
+    article_id: str,
+    article_meta: dict | None,
+) -> tuple[list[Clip], dict[str, str]]:
+    """切片 → 上传 COS → 写 clipquery_clips。返回 (clips, clip_id → clip_url)。"""
+    clips = cut_clips(video_path, article_id)
+    if not clips:
+        return [], {}
+
+    source_video_url = (article_meta or {}).get("cos_video_url")
+    article_url = (article_meta or {}).get("url")
+    title = (article_meta or {}).get("title")
+    ingested_at = datetime.now(timezone.utc).isoformat()
+
+    clip_docs: list[dict] = []
+    clip_url_map: dict[str, str] = {}
+    for c in clips:
+        try:
+            url = cos_client.upload_and_delete(
+                c.local_path, cos_client.clip_key(article_id, c.id)
+            )
+        except Exception as e:
+            print(f"[WARN] 片段上传 COS 失败 {c.id}: {e}")
+            url = str(c.local_path)
+        clip_url_map[c.id] = url
+        clip_docs.append({
+            "clip_id":          c.id,
+            "article_id":       article_id,
+            "index":            c.index,
+            "start_time":       c.start_time,
+            "end_time":         c.end_time,
+            "duration":         c.duration,
+            "clip_url":         url,
+            "source_video_url": source_video_url,
+            "article_url":      article_url,
+            "title":            title,
+            "ingested_at":      ingested_at,
+        })
+
+    try:
+        get_clip_store().upsert_many(clip_docs)
+    except Exception as e:
+        print(f"[WARN] 写 clipquery_clips 失败: {e}")
+
+    # 本地片段目录通常只剩空壳，顺手删
+    clips_dir = settings.data_dir / "clips" / article_id
+    if clips_dir.exists():
+        shutil.rmtree(clips_dir, ignore_errors=True)
+
+    return clips, clip_url_map
+
+
+def _load_article_meta(article_id: str) -> dict | None:
+    """从 OpenSearch article 索引拿元数据；没有则返回 None。"""
+    try:
+        return get_article_store().get(article_id)
+    except Exception as e:
+        print(f"[WARN] 读 article 元数据失败: {e}")
+        return None
+
+
+def ingest_video(
+    video_path: str | Path,
+    *,
+    article_id: str | None = None,
+    encoder: ClipEncoder | None = None,
+    vector_store: VectorStore | None = None,
+    save_thumbs: bool = True,
+    show_progress: bool = True,
+    skip_if_exists: bool = True,
+) -> int:
+    """切片 → 抽帧 → CLIP 编码 → 写 OpenSearch。返回写入的帧数。"""
+    video_path = Path(video_path).resolve()
+    encoder = encoder or get_encoder()
+    vector_store = vector_store or VectorStore()
+
+    if skip_if_exists and vector_store.video_frame_count(str(video_path)) > 0:
+        return 0
+
+    article_id = article_id or _infer_article_id(str(video_path))
+    article_meta = _load_article_meta(article_id)
+
+    # 1. 切片 + 上传 + 写 clips 索引
+    clips, _clip_urls = _process_clips(video_path, article_id, article_meta)
+    clips_sorted = sorted(clips, key=lambda c: c.start_time)
+
+    # 2. 抽帧 + CLIP 编码 + 绑定到所属 clip
+    ingested_at = datetime.now(timezone.utc).isoformat()
+    total_written = 0
+    frame_iter = iter_frames(str(video_path))
+    if show_progress:
+        frame_iter = tqdm(frame_iter, desc=video_path.name, unit="frame")
+
+    for batch in _batched(frame_iter, settings.batch_size):
+        images = [f.image for f in batch]
+        vecs: np.ndarray = encoder.encode_images(images)
+
+        ids: list[str] = []
+        metadatas: list[dict] = []
+
+        for frame in batch:
+            fid = _frame_id(frame.video_path, frame.frame_index)
+            thumb_url: str | None = None
+            if save_thumbs:
+                thumb_path = settings.thumbnails_dir / f"{fid}.jpg"
+                save_thumbnail(frame.image, thumb_path)
+                try:
+                    thumb_url = cos_client.upload_and_delete(
+                        thumb_path, cos_client.thumbnail_key(article_id, fid)
+                    )
+                except Exception as e:
+                    print(f"[WARN] 缩略图上传 COS 失败 {fid}: {e}")
+                    thumb_url = str(thumb_path)
+
+            owning_clip = find_clip_for_timestamp(clips_sorted, frame.timestamp)
+
+            ids.append(fid)
+            metadatas.append({
+                "article_id":  article_id,
+                "clip_id":     owning_clip.id if owning_clip else None,
+                "video_path":  frame.video_path,
+                "frame_index": frame.frame_index,
+                "timestamp":   frame.timestamp,
+                "thumbnail":   thumb_url,
+                "ingested_at": ingested_at,
+            })
+
+        vector_store.add(ids=ids, embeddings=vecs, metadatas=metadatas)
+        total_written += len(ids)
+
+    if total_written > 0:
+        vector_store.refresh()
+
+    # 入库全部成功：清理 news/<article_id>/ 本地副本（含 video.mp4）。
+    # 失败则保留，便于排查和重试。
+    if total_written > 0:
+        article_dir = video_path.parent
+        if article_dir.name == article_id and article_dir.exists():
+            shutil.rmtree(article_dir, ignore_errors=True)
+            print(f"[OK] 已清理本地 {article_dir}")
+
+    return total_written
