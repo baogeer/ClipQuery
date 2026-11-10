@@ -21,7 +21,6 @@ def _article_index_body() -> dict:
                 "id":            {"type": "keyword"},
                 "url":           {"type": "keyword"},
                 "title":         {"type": "text"},
-                "folder_name":   {"type": "keyword"},
                 "video_m3u8":    {"type": "keyword"},
                 "paragraphs":    {"type": "text"},
                 "mp4_file":      {"type": "keyword"},
@@ -71,6 +70,49 @@ class ArticleStore:
 
     def exists(self, article_id: str) -> bool:
         return bool(self.client.exists(index=self.index, id=article_id))
+
+    def delete(self, article_id: str) -> bool:
+        """删除单条文章元数据。不存在时返回 False，不抛错。"""
+        res = self.client.delete(index=self.index, id=article_id, ignore=[404], refresh=True)
+        return res.get("result") == "deleted"
+
+    def list(
+        self,
+        offset: int = 0,
+        limit: int = 20,
+        q: str | None = None,
+        fields: list[str] | None = None,
+    ) -> tuple[list[dict], int]:
+        """按 ingested_at 倒序返回文章列表。
+
+        - q: 非空则按 title 做 match 查询；空则返回全部。
+        - fields: _source 字段白名单；None 则返回完整 _source。
+        - 返回 (hits, total)。hits 每条含 _id 回填到字段 "id"。
+        """
+        if q and q.strip():
+            query: dict[str, Any] = {"match": {"title": q.strip()}}
+        else:
+            query = {"match_all": {}}
+
+        body: dict[str, Any] = {
+            "query": query,
+            "from":  offset,
+            "size":  limit,
+            "sort":  [{"ingested_at": {"order": "desc", "missing": "_last"}}],
+            "track_total_hits": True,
+        }
+        if fields is not None:
+            body["_source"] = fields
+
+        res = self.client.search(index=self.index, body=body)
+        hits = res.get("hits", {}).get("hits", []) or []
+        total = res.get("hits", {}).get("total", {}).get("value", 0)
+        docs: list[dict] = []
+        for h in hits:
+            src = dict(h.get("_source") or {})
+            src.setdefault("id", h.get("_id"))
+            docs.append(src)
+        return docs, int(total)
 
 
 @lru_cache(maxsize=1)

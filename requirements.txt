@@ -1,8 +1,13 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
+# 服务端纯 API（REST + MCP），不含定时/异步 scheduler；
+# pydantic v2 + 现代 fastapi 以满足 mcp SDK 需求。
+fastapi>=0.115.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
+
+# MCP 服务（HTTP + SSE，streamable-http transport）
+mcp>=1.2.0,<2.0.0
 
 opencv-python>=4.9.0
 Pillow>=10.2.0
@@ -14,9 +19,10 @@ torch>=2.2.0
 opensearch-py>=2.6.0
 
 cos-python-sdk-v5>=1.9.29
-scenedetect[opencv]>=0.6.4
+# 0.7+ 已经把 opencv 变成基础依赖，extra 被移除
+scenedetect>=0.6.4
 
-apscheduler>=3.10.0
+redis>=4.3.4,<5.0.0
 
 tqdm>=4.66.0
 

@@ -1,37 +1,38 @@
 import os
 from pathlib import Path
+from typing import Optional
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .paths import DATA_DIR, NEWS_DIR, PROJECT_ROOT
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="CLIPQUERY_",
-        env_file=str(PROJECT_ROOT / ".env"),
-        extra="ignore",
-    )
-
     project_root: Path = PROJECT_ROOT
     data_dir: Path = DATA_DIR
     news_dir: Path = NEWS_DIR
 
     # Hugging Face token（可选）：不带 CLIPQUERY_ 前缀，直接读 .env 里的 HF_TOKEN。
     # 公开模型（如 clip-ViT-B-32）不填也能下；私有/受限模型才需要。
-    hf_token: str | None = Field(default=None, validation_alias="HF_TOKEN")
+    # pydantic v2：Field(env=...) 已废弃，改用 validation_alias。
+    hf_token: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("HF_TOKEN", "CLIPQUERY_HF_TOKEN")
+    )
 
     # Hugging Face 镜像站（可选）：国内访问官方 huggingface.co 慢/被墙时用。
     # 默认走 hf-mirror.com；想回官方就在 .env 里设 HF_ENDPOINT= 或留空。
-    hf_endpoint: str | None = Field(
+    hf_endpoint: Optional[str] = Field(
         default="https://hf-mirror.com",
-        validation_alias="HF_ENDPOINT",
+        validation_alias=AliasChoices("HF_ENDPOINT", "CLIPQUERY_HF_ENDPOINT"),
     )
 
     # Hugging Face 缓存目录（可选）：默认落在项目根下的 data/hf_cache。
     # 相对路径按**项目根**解析（见底部回填逻辑），避免跟进程 cwd 耦合。
-    hf_home: str | None = Field(default="data/hf_cache", validation_alias="HF_HOME")
+    hf_home: Optional[str] = Field(
+        default="data/hf_cache",
+        validation_alias=AliasChoices("HF_HOME", "CLIPQUERY_HF_HOME"),
+    )
 
     clip_model_name: str = "clip-ViT-B-32"
     embedding_dim: int = 512
@@ -46,6 +47,13 @@ class Settings(BaseSettings):
     clip_min_seconds: float = 2.0           # 短于此长度的场景并入相邻片段
     scene_detect_threshold: float = 27.0    # PySceneDetect ContentDetector 阈值
 
+    # 台词索引：indexer 入库时顺手把 SRT 过 CLIP 文本编码写 clipquery_subtitles
+    index_subtitles: bool = True
+    # 过短的 cue（秒）跳过不入库——通常是语气词 / 字幕错切，噪声大
+    subtitle_min_duration: float = 0.3
+    # 过短的文本（字符数）也跳过
+    subtitle_min_text_len: int = 2
+
     opensearch_host: str = "vpc-sg-cgtn-test-newspal-es-bbhcyqsbrsoxbc442kc5sxkgo4.ap-southeast-1.es.amazonaws.com"
     opensearch_port: int = 443
     opensearch_username: str = "admin"
@@ -55,20 +63,49 @@ class Settings(BaseSettings):
     opensearch_index: str = "clipquery_frames"
     opensearch_article_index: str = "clipquery_articles"
     opensearch_clip_index: str = "clipquery_clips"
-    opensearch_worker_index: str = "clipquery_workers"   # worker 注册 + 心跳
-    opensearch_task_index: str = "clipquery_tasks"       # 异步任务状态
+    opensearch_subtitle_index: str = "clipquery_subtitles"
 
-    # --- 分布式调度 ---
-    # worker 心跳周期（秒）。
-    scheduler_heartbeat_interval: int = 10
-    # worker 心跳过期阈值（秒）。超过该值不更新就视为死亡，从 hash 环中剔除。
-    scheduler_worker_ttl: int = 30
-    # 任务心跳过期阈值（秒）。in_progress 任务超过此未更新允许被别的 worker 抢占。
-    scheduler_task_ttl: int = 300
-    # 一致性 hash 环每个 worker 的虚拟节点数。越大分布越均匀但计算越慢。
-    scheduler_vnodes: int = 150
-    # CGTN transcript 扫描周期（分钟）。
-    scheduler_cgtn_interval_minutes: int = 60
+    # --- Redis（任务队列 + 分布式锁，仅本地脚本使用） ---
+    # 用于：
+    #   1) 异步任务队列（本地脚本 LPUSH → 本地 consume 脚本 BRPOP）
+    #   2) 任务元数据 hash（task:<task_id>）
+    #   3) executor 的分布式锁 ClipQuery:lock:<task_id>
+    redis_host: str = "master.sg-cgtn-test-newspal-redis.k1f3xq.apse1.cache.amazonaws.com"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_username: Optional[str] = None
+    redis_password: Optional[str] = "m7&xK!pQ4#rT8^nYsvL2"
+    redis_ssl: bool = True
+
+    # Redis key 命名空间（大小写敏感，与 COS 前缀对齐）
+    project_name: str = "ClipQuery"
+    # 保留字段：早期依赖留下的 pool size，当前代码未读取。
+    thread_pool_size: int = 32
+
+    # 任务队列 key：脚本 LPUSH 到这里，consume 脚本 BRPOP 消费
+    redis_ingest_queue_key: str = "ClipQuery:ingest:queue"
+    # 任务元数据 key 前缀：<prefix>:<task_id> 存成 hash
+    redis_task_meta_prefix: str = "ClipQuery:task:"
+    # 任务元数据 TTL（秒）。done/failed 后保留 24h 供轮询
+    redis_task_meta_ttl: int = 86400
+    # BRPOP 单次阻塞时长（秒）
+    redis_brpop_timeout: int = 5
+
+    # --- 任务执行参数 ---
+    # 服务进程完全不读以下 3 项，保留只为 .env 老文件不报错：
+    #   worker_enabled                      —— 历史开关，无处读取
+    #   scheduler_cgtn_interval_seconds     —— 仅 clipquery.task.cgtn.wait_run_forever
+    #                                          (scripts/scan_cgtn.py --loop 入口) 会读
+    #   scheduler_consume_interval_seconds  —— 历史字段，无处读取
+    worker_enabled: bool = False
+    scheduler_cgtn_interval_seconds: int = 3600
+    scheduler_consume_interval_seconds: int = 10
+    # 下面两项 scripts/consume_one.py → executor 真会读
+    # executor 执行任务时每多少秒刷新一次 Redis 锁
+    scheduler_task_heartbeat: int = 60
+    # 单条任务执行上限（秒），超时自动释放锁让别人接管
+    scheduler_task_ttl: int = 1800
+
     opensearch_bulk_size: int = 128
     opensearch_knn_ef_search: int = 128
     # KNN 引擎：OpenSearch 3.0+ 废弃 nmslib，默认走 faiss（2.x 也支持）。
@@ -91,6 +128,13 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+
+    model_config = SettingsConfigDict(
+        env_prefix="CLIPQUERY_",
+        env_file=str(PROJECT_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 settings = Settings()

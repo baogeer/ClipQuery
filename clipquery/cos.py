@@ -93,3 +93,39 @@ def thumbnail_key(article_id: str, frame_id: str) -> str:
 def clip_key(article_id: str, clip_id: str) -> str:
     """片段 MP4 路径：<prefix>/<article_id>/clips/<clip_id>.mp4"""
     return f"{settings.cos_prefix.strip('/')}/{article_id}/clips/{clip_id}.mp4"
+
+
+def article_prefix(article_id: str) -> str:
+    """一篇文章在 COS 上所有产物的公共前缀：<prefix>/<article_id>/"""
+    return f"{settings.cos_prefix.strip('/')}/{article_id}/"
+
+
+def delete_prefix(prefix: str) -> int:
+    """删除某前缀下所有对象。返回删除对象数。用于 purge_article 强制重跑。"""
+    prefix = prefix.lstrip("/")
+    client = get_cos()
+    deleted = 0
+    marker = ""
+    while True:
+        res = client.list_objects(
+            Bucket=settings.cos_bucket,
+            Prefix=prefix,
+            Marker=marker,
+            MaxKeys=1000,
+        )
+        objs = res.get("Contents") or []
+        if not objs:
+            break
+        batch = [{"Key": o["Key"]} for o in objs]
+        # delete_objects 一次最多 1000 个
+        client.delete_objects(
+            Bucket=settings.cos_bucket,
+            Delete={"Object": batch, "Quiet": "true"},
+        )
+        deleted += len(batch)
+        if res.get("IsTruncated") in ("true", True):
+            marker = res.get("NextMarker") or batch[-1]["Key"]
+        else:
+            break
+    return deleted
+

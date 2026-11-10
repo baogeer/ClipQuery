@@ -3,7 +3,7 @@ data/
 __pycache__/
 .venv/
 venv/
-.env
+*.env
 .idea/
 .vscode/
 *.egg-info/

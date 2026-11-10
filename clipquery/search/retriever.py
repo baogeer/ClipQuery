@@ -9,6 +9,7 @@ from PIL import Image
 from ..pipeline.encoder import ClipEncoder, get_encoder
 from ..storage.article_store import ArticleStore, get_article_store
 from ..storage.clip_store import ClipStore, get_clip_store
+from ..storage.subtitle_store import SubtitleStore, get_subtitle_store
 from ..storage.vector_store import VectorStore
 
 
@@ -29,6 +30,21 @@ class ClipSegment:
     best_frame_id: str | None = None
 
 
+@dataclass
+class SubtitleSegment:
+    """台词搜返回的单元：一句台词 + 它在视频里的精确时间。"""
+    article_id: str
+    article_url: str | None
+    title: str | None
+    clip_id: str | None                # 台词时间点落在哪个片段（可能为空）
+    clip_url: str | None               # 对应片段的 COS MP4（可直接 <video src>）
+    start_time: float                  # 台词起始秒（相对于原视频）
+    end_time: float                    # 台词结束秒
+    text: str                          # 原台词文本
+    score: float                       # CLIP 余弦相似度
+    source_video_url: str | None = None  # 原片 COS URL，前端可 seek 到 start_time
+
+
 class Retriever:
     def __init__(
         self,
@@ -36,11 +52,13 @@ class Retriever:
         vector_store: VectorStore | None = None,
         clip_store: ClipStore | None = None,
         article_store: ArticleStore | None = None,
+        subtitle_store: SubtitleStore | None = None,
     ) -> None:
         self.encoder = encoder or get_encoder()
         self.vector_store = vector_store or VectorStore()
         self.clip_store = clip_store or get_clip_store()
         self.article_store = article_store or get_article_store()
+        self.subtitle_store = subtitle_store or get_subtitle_store()
 
     def _encode_query(self, text: str | None, image_bytes: bytes | None) -> np.ndarray:
         if text and image_bytes:
@@ -130,3 +148,63 @@ class Retriever:
 
         segments.sort(key=lambda s: s.score, reverse=True)
         return segments[:top_k]
+
+    # ==================== 台词搜 ====================
+    def search_subtitle(
+        self,
+        text: str,
+        top_k: int = 10,
+        candidate_k: int | None = None,
+    ) -> list[SubtitleSegment]:
+        """按台词语义搜 → 命中带精确 start_time / end_time。
+
+        流程：
+          1) CLIP 文本编码（和 frames 同一个 512d 空间）
+          2) KNN clipquery_subtitles
+          3) 按 clip_id 拉片段 URL；按 article_id 拉文章元数据
+          4) 装配 SubtitleSegment 返回
+
+        candidate_k 一般 = top_k，台词索引里已经一条一个粒度，不像 frames 需要
+        多召回后聚合。
+        """
+        if not text or not text.strip():
+            return []
+
+        candidate_k = candidate_k or max(top_k, 20)
+        qvec = self.encoder.encode_text(text)[0]
+
+        hits = self.subtitle_store.query(qvec, top_k=candidate_k)
+        if not hits:
+            return []
+
+        clip_ids = {h.metadata.get("clip_id") for h in hits if h.metadata.get("clip_id")}
+        clip_docs = self.clip_store.get_many(list(clip_ids)) if clip_ids else {}
+
+        article_ids = {h.metadata.get("article_id") for h in hits if h.metadata.get("article_id")}
+        article_docs: dict[str, dict] = {}
+        for aid in article_ids:
+            doc = self.article_store.get(aid)
+            if doc:
+                article_docs[aid] = doc
+
+        out: list[SubtitleSegment] = []
+        for h in hits:
+            aid = h.metadata.get("article_id") or ""
+            cid = h.metadata.get("clip_id")
+            adoc = article_docs.get(aid) or {}
+            cdoc = clip_docs.get(cid) if cid else None
+            out.append(SubtitleSegment(
+                article_id=aid,
+                article_url=(cdoc or {}).get("article_url") or adoc.get("url"),
+                title=(cdoc or {}).get("title") or adoc.get("title"),
+                clip_id=cid,
+                clip_url=(cdoc or {}).get("clip_url"),
+                start_time=float(h.metadata.get("start_time", 0.0)),
+                end_time=float(h.metadata.get("end_time", 0.0)),
+                text=h.metadata.get("text") or "",
+                score=h.score,
+                source_video_url=adoc.get("cos_video_url"),
+            ))
+
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out[:top_k]

@@ -76,6 +76,14 @@ class ClipStore:
         body = {"query": {"term": {"article_id": article_id}}}
         return int(self.client.count(index=self.index, body=body).get("count", 0))
 
+    def delete_for_article(self, article_id: str) -> int:
+        """按 article_id 批量删片段元数据。返回删除条数。"""
+        body = {"query": {"term": {"article_id": article_id}}}
+        res = self.client.delete_by_query(
+            index=self.index, body=body, refresh=True, conflicts="proceed",
+        )
+        return int(res.get("deleted", 0))
+
 
 @lru_cache(maxsize=1)
 def get_clip_store() -> ClipStore:

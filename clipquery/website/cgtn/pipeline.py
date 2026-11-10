@@ -224,8 +224,7 @@ def process_one_article(article_url: str) -> dict | None:
         return None
 
     # 1. 以 id 作为目录名，天然避免重名
-    folder_name = article_id
-    article_dir = os.path.join(BASE_SAVE_DIR, folder_name)
+    article_dir = os.path.join(BASE_SAVE_DIR, article_id)
     os.makedirs(article_dir, exist_ok=True)
 
     info_path = os.path.join(article_dir, "info.json")
@@ -297,7 +296,6 @@ def process_one_article(article_url: str) -> dict | None:
         # 5. 组装 meta
         meta: dict = {
             "id": article_id,
-            "folder_name": folder_name,
             "url": article_url,
             "title": title,
             "mp4_file": mp4_name,
@@ -308,8 +306,9 @@ def process_one_article(article_url: str) -> dict | None:
         }
 
         # 6. 上传静态文件到 COS。
-        #    - video.mp4 保留本地，等 indexer 跑完再删
-        #    - audio.mp3 / video.srt 上传后立即删
+        #    - video.mp4 / video.srt 保留本地，等 indexer 跑完再删
+        #      （SRT 要留给 indexer 读取做台词索引）
+        #    - audio.mp3 上传后立即删
         try:
             meta["cos_video_url"] = cos_client.upload_file(
                 final_mp4, cos_client.article_key(article_id, mp4_name)
@@ -320,7 +319,8 @@ def process_one_article(article_url: str) -> dict | None:
                 )
             else:
                 meta["cos_audio_url"] = None
-            meta["cos_srt_url"] = cos_client.upload_and_delete(
+            # SRT 只上传，不删本地。indexer 读完后由 ingest_video 的最后一步 rmtree 清掉。
+            meta["cos_srt_url"] = cos_client.upload_file(
                 srt_path, cos_client.article_key(article_id, srt_name)
             )
         except Exception as e:
