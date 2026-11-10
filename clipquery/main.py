@@ -150,16 +150,18 @@ def _setup_logging() -> None:
 # ==================== FastAPI 应用 ====================
 # MCP 的 Streamable-HTTP transport 内部有 session manager 需要 lifespan 管理，
 # 这里把它的 lifespan 组合进主 app，确保 MCP 启动/关闭都被执行。
-from .mcp_server import get_mcp_asgi_app  # noqa: E402
+from .mcp_server import get_mcp_asgi_app, get_mcp_sse_app  # noqa: E402
 
-_mcp_asgi = get_mcp_asgi_app()
+_mcp_asgi = get_mcp_asgi_app()   # Streamable-HTTP transport（新协议）
+_mcp_sse  = get_mcp_sse_app()    # SSE transport（旧协议，兼容老客户端）
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _setup_logging()
     logger.info("ClipQuery API 启动 worker_id=%s (只做 API，不消费队列)", WORKER_ID)
-    async with _mcp_asgi.router.lifespan_context(_mcp_asgi):
+    async with _mcp_asgi.router.lifespan_context(_mcp_asgi), \
+               _mcp_sse.router.lifespan_context(_mcp_sse):
         try:
             yield
         finally:
@@ -167,7 +169,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ClipQuery", version="0.7.0", lifespan=lifespan)
+# 同时挂 /mcp 和 /mcp/：客户端不管带不带尾斜杠都直接命中，避免 307 重定向
+# （部分 MCP 客户端如 workbuddy 不跟随 POST 的 307，否则会表现为 404 / SSE 连接失败）。
+app.mount("/mcp/", _mcp_asgi)
 app.mount("/mcp", _mcp_asgi)
+# 老 SSE transport：兼容只支持旧协议的客户端（workbuddy 某些版本）。
+app.mount("/sse/", _mcp_sse)
+app.mount("/sse", _mcp_sse)
 
 
 # ==================== 健康检查 ====================

@@ -156,8 +156,15 @@ def search_subtitle(query: str, top_k: int = 10) -> dict[str, Any]:
     }
 
 
-# FastMCP 的 streamable-http transport 返回一个 Starlette 子应用，
-# 主 FastAPI 用 app.mount("/mcp", mcp_asgi_app) 挂载。
+# FastMCP 两个 transport：
+#   - streamable-http: 新协议（2024-11），单个 POST 端点，推荐
+#   - sse:             旧协议（2024-03），GET /sse + POST /messages/，老客户端用
+# 主 FastAPI 分别挂到 /mcp 和 /sse 两个路径，兼容两类客户端。
 def get_mcp_asgi_app():
-    """返回可挂载到 FastAPI 的 ASGI app。延迟调用，避免 import 时副作用。"""
+    """返回 streamable-http ASGI app，挂到 /mcp。延迟调用，避免 import 时副作用。"""
     return mcp.streamable_http_app()
+
+
+def get_mcp_sse_app():
+    """返回 SSE ASGI app，挂到 /sse。兼容只支持旧 SSE transport 的客户端（如部分版本的 workbuddy）。"""
+    return mcp.sse_app()

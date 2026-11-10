@@ -32,15 +32,15 @@ docker build -t clipquery:latest .
 
 # 3. 启动（服务只跑 API，不做任何异步处理）
 docker run -d --name clipquery \
-  -p 8000:8000 \
+  -p 8008:8000 \
   -v $PWD/.env:/app/.env:ro \
   -v clipquery-news:/app/news \
   -v clipquery-data:/app/data \
   --restart unless-stopped \
   clipquery:latest
 
-# 4. 验证
-curl http://localhost:8000/health
+# 4. 验证（容器内监听 8000，宿主机映射到 8008）
+curl http://localhost:8008/health
 ```
 
 **本地启动 TL;DR**（Windows / Linux / macOS 通用，完整版见部署文档 §5）：
@@ -92,11 +92,13 @@ python scripts/scan_cgtn.py
 # 从 Redis 队列拿一条执行
 python scripts/consume_one.py
 
-# 任务状态 HTTP 仍可查（前端轮询用）
+# 任务状态 HTTP 仍可查（前端轮询用，Docker 部署时端口替换成宿主机映射端口如 8008）
 curl http://localhost:8000/task/ingest-<article_id>
 ```
 
 ### 检索
+
+> 本地启动走 `localhost:8000`；Docker 部署端口映射 `8008:8000`，把下面的 `8000` 换成 `8008`。
 
 ```bash
 # 文本
