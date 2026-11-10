@@ -28,15 +28,28 @@ from .storage.vector_store import get_vector_store
 
 logger = logging.getLogger("clipquery.mcp")
 
-# 让 FastMCP 的内部路由直接定义在 /mcp 和 /sse 上，外层 FastAPI 把它们挂到根 "/"。
-# 这样精确访问 /mcp 就能命中，不会触发 Starlette Mount 对 "带前缀但无尾斜杠" 的 307 重定向
-# （部分 MCP 客户端如 workbuddy 不正确跟随 307，表现为 404 / 421 "Request body length"）。
-mcp = FastMCP(
-    "ClipQuery",
-    streamable_http_path="/mcp",
-    sse_path="/sse",
-    message_path="/messages/",
-)
+mcp = FastMCP("ClipQuery")
+
+# 关闭 DNS rebinding 防护（允许任意 Host / Origin），否则用 IP 直连会 421 "Invalid Host header"。
+# 内网部署没有 DNS rebinding 威胁，直接放开最省心。不同 FastMCP 版本设置路径不同，三种都尝试。
+def _relax_mcp_security(server: FastMCP) -> None:
+    for attr_chain in (
+        ("settings", "streamable_http_security_settings"),
+        ("settings", "security_settings"),
+    ):
+        obj = server
+        try:
+            for a in attr_chain:
+                obj = getattr(obj, a)
+            for field in ("allowed_hosts", "allowed_origins"):
+                try:
+                    setattr(obj, field, ["*"])
+                except Exception:
+                    pass
+        except AttributeError:
+            continue
+
+_relax_mcp_security(mcp)
 
 
 # ==================== 工具 ====================
