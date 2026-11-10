@@ -169,13 +169,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ClipQuery", version="0.7.0", lifespan=lifespan)
-# 同时挂 /mcp 和 /mcp/：客户端不管带不带尾斜杠都直接命中，避免 307 重定向
-# （部分 MCP 客户端如 workbuddy 不跟随 POST 的 307，否则会表现为 404 / SSE 连接失败）。
-app.mount("/mcp/", _mcp_asgi)
-app.mount("/mcp", _mcp_asgi)
-# 老 SSE transport：兼容只支持旧协议的客户端（workbuddy 某些版本）。
-app.mount("/sse/", _mcp_sse)
-app.mount("/sse", _mcp_sse)
+# FastMCP 构造时已把 streamable_http_path/sse_path 都设为 "/"，
+# 这里直接挂到 /mcp 和 /sse 就对外呈现 /mcp 和 /sse 两个端点。
+app.mount("/mcp", _mcp_asgi)   # Streamable-HTTP（新协议，推荐）
+app.mount("/sse", _mcp_sse)    # SSE（旧协议，兼容只支持 SSE 的客户端）
 
 
 # ==================== 健康检查 ====================

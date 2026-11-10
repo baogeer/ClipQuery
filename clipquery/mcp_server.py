@@ -28,7 +28,16 @@ from .storage.vector_store import get_vector_store
 
 logger = logging.getLogger("clipquery.mcp")
 
-mcp = FastMCP("ClipQuery")
+# 把 FastMCP 内部的 HTTP 路径都设为 "/"，这样外层 FastAPI 用 app.mount("/mcp", ...)
+# 包起来后，真实端点就是 /mcp（而不是 /mcp/mcp 之类的嵌套路径）。
+# streamable_http_path: 新协议的单一 POST 端点
+# sse_path / message_path: 老 SSE 协议的 GET /sse 与 POST /messages
+mcp = FastMCP(
+    "ClipQuery",
+    streamable_http_path="/",
+    sse_path="/",
+    message_path="/messages/",
+)
 
 
 # ==================== 工具 ====================
