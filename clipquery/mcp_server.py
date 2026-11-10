@@ -28,14 +28,13 @@ from .storage.vector_store import get_vector_store
 
 logger = logging.getLogger("clipquery.mcp")
 
-# 把 FastMCP 内部的 HTTP 路径都设为 "/"，这样外层 FastAPI 用 app.mount("/mcp", ...)
-# 包起来后，真实端点就是 /mcp（而不是 /mcp/mcp 之类的嵌套路径）。
-# streamable_http_path: 新协议的单一 POST 端点
-# sse_path / message_path: 老 SSE 协议的 GET /sse 与 POST /messages
+# 让 FastMCP 的内部路由直接定义在 /mcp 和 /sse 上，外层 FastAPI 把它们挂到根 "/"。
+# 这样精确访问 /mcp 就能命中，不会触发 Starlette Mount 对 "带前缀但无尾斜杠" 的 307 重定向
+# （部分 MCP 客户端如 workbuddy 不正确跟随 307，表现为 404 / 421 "Request body length"）。
 mcp = FastMCP(
     "ClipQuery",
-    streamable_http_path="/",
-    sse_path="/",
+    streamable_http_path="/mcp",
+    sse_path="/sse",
     message_path="/messages/",
 )
 

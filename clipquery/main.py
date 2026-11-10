@@ -169,10 +169,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ClipQuery", version="0.7.0", lifespan=lifespan)
-# FastMCP 构造时已把 streamable_http_path/sse_path 都设为 "/"，
-# 这里直接挂到 /mcp 和 /sse 就对外呈现 /mcp 和 /sse 两个端点。
-app.mount("/mcp", _mcp_asgi)   # Streamable-HTTP（新协议，推荐）
-app.mount("/sse", _mcp_sse)    # SSE（旧协议，兼容只支持 SSE 的客户端）
+# MCP ASGI 子应用的 mount("/") 必须放在文件末尾所有 @app.get/post 之后，
+# 否则 mount 会贪婪匹配所有路径，把 /health、/search 等 REST 路由全盖掉。
+# 实际挂载见文件底部。
 
 
 # ==================== 健康检查 ====================
@@ -289,3 +288,13 @@ async def search_subtitle(
     retriever = Retriever()
     segments = retriever.search_subtitle(text=query, top_k=top_k)
     return SubtitleSearchResponse(results=[_to_subtitle_out(s) for s in segments])
+
+
+# ==================== MCP 挂载（放在所有 REST 路由之后）====================
+# FastMCP 内部已把路由定义在 /mcp 和 /sse 上，这里挂到根 "/"：
+# 实际端点就是 /mcp 和 /sse（不是 /mcp/mcp），也不会触发 Starlette Mount
+# 对 "带前缀且无尾斜杠" 请求的 307 重定向——部分 MCP 客户端（如 workbuddy）
+# 不正确跟随 POST 的 307，会表现为 404 / 421 "Request body length"。
+# 两个 mount 必须放在所有 @app.get/post 装饰器之后，否则会贪婪匹配盖住 REST 路由。
+app.mount("/", _mcp_asgi)   # 内部路由 /mcp （新协议 Streamable-HTTP）
+app.mount("/", _mcp_sse)    # 内部路由 /sse + /messages/ （旧协议 SSE）
