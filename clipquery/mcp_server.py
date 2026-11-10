@@ -19,6 +19,7 @@ import logging
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .queue import get_queue
 from .search.retriever import Retriever
@@ -28,28 +29,25 @@ from .storage.vector_store import get_vector_store
 
 logger = logging.getLogger("clipquery.mcp")
 
-mcp = FastMCP("ClipQuery")
-
-# 关闭 DNS rebinding 防护（允许任意 Host / Origin），否则用 IP 直连会 421 "Invalid Host header"。
-# 内网部署没有 DNS rebinding 威胁，直接放开最省心。不同 FastMCP 版本设置路径不同，三种都尝试。
-def _relax_mcp_security(server: FastMCP) -> None:
-    for attr_chain in (
-        ("settings", "streamable_http_security_settings"),
-        ("settings", "security_settings"),
-    ):
-        obj = server
-        try:
-            for a in attr_chain:
-                obj = getattr(obj, a)
-            for field in ("allowed_hosts", "allowed_origins"):
-                try:
-                    setattr(obj, field, ["*"])
-                except Exception:
-                    pass
-        except AttributeError:
-            continue
-
-_relax_mcp_security(mcp)
+# MCP 自带 DNS rebinding 防护，默认只允许 Host=localhost/127.0.0.1，
+# 用 IP（如 10.81.20.229:8008）直连会 421 "Invalid Host header"。
+# 内网部署没有 DNS rebinding 威胁，直接关掉；线上若对外暴露应显式列白名单。
+#
+# 路径安排：
+# - streamable-http 保持默认内部路径 /mcp，外层 main.py 用 app.mount("/", _mcp_asgi) 让 /mcp 对外
+# - sse 内部路径改成 "/"，外层 app.mount("/sse", _mcp_sse) 让 /sse 对外；
+#   消息端点同理从默认 /messages/ 不变（在 /sse 前缀下即 /sse/messages/）
+# 两个子应用不能都挂到根 "/"：Starlette 会让后挂的覆盖前挂的，所以必须错开 mount 前缀。
+mcp = FastMCP(
+    "ClipQuery",
+    sse_path="/",
+    message_path="/messages/",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+        allowed_hosts=["*"],
+        allowed_origins=["*"],
+    ),
+)
 
 
 # ==================== 工具 ====================
@@ -178,33 +176,15 @@ def search_subtitle(query: str, top_k: int = 10) -> dict[str, Any]:
 
 
 # FastMCP 两个 transport：
-#   - streamable-http: 新协议（2024-11），单个 POST 端点 /mcp
-#   - sse:             旧协议（2024-03），GET /sse + POST /messages/，老客户端用
-# 两个 ASGI 子应用的内部路由分别在 /mcp 和 /sse、/messages/；
-# 外层 FastAPI 用 app.mount("/", ...) 挂到根，对外暴露的就是原生路径。
-#
-# 额外问题：FastMCP 的 Streamable-HTTP transport 内置 DNS rebinding 防护，
-# 收到不在白名单里的 Host 头会返回 421 "Invalid Host header"。
-# 不同版本的 settings 字段路径不同，直接在 ASGI 层包一个中间件把 Host 改成 localhost
-# 最彻底：防护仍然生效，只是我们的流量永远是"合法"的本地请求。
-def _strip_host_header_asgi(app):
-    async def wrapped(scope, receive, send):
-        if scope.get("type") == "http":
-            headers = list(scope.get("headers") or [])
-            headers = [(k, v) for (k, v) in headers if k.lower() != b"host"]
-            headers.append((b"host", b"localhost"))
-            scope = {**scope, "headers": headers}
-        await app(scope, receive, send)
-    # 透传 lifespan（Starlette 需要它存在才能启动 session manager）
-    wrapped.router = getattr(app, "router", None)
-    return wrapped
-
-
+#   - streamable-http: 新协议（2024-11），内部路由 /mcp
+#   - sse:             旧协议（2024-03），内部路由 /sse + /messages/，兼容老客户端
+# 两个 ASGI 子应用的 route 都已在 /mcp、/sse、/messages 这几个确定路径上，
+# 外层 FastAPI 挂到根 "/" 即可；见 main.py 底部。
 def get_mcp_asgi_app():
     """返回 streamable-http ASGI app（内部路径 /mcp）。延迟调用避免 import 副作用。"""
-    return _strip_host_header_asgi(mcp.streamable_http_app())
+    return mcp.streamable_http_app()
 
 
 def get_mcp_sse_app():
     """返回 SSE ASGI app（内部路径 /sse + /messages/）。兼容老 MCP 客户端（如 workbuddy）。"""
-    return _strip_host_header_asgi(mcp.sse_app())
+    return mcp.sse_app()

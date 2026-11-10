@@ -291,10 +291,11 @@ async def search_subtitle(
 
 
 # ==================== MCP 挂载（放在所有 REST 路由之后）====================
-# FastMCP 内部已把路由定义在 /mcp 和 /sse 上，这里挂到根 "/"：
-# 实际端点就是 /mcp 和 /sse（不是 /mcp/mcp），也不会触发 Starlette Mount
-# 对 "带前缀且无尾斜杠" 请求的 307 重定向——部分 MCP 客户端（如 workbuddy）
-# 不正确跟随 POST 的 307，会表现为 404 / 421 "Request body length"。
-# 两个 mount 必须放在所有 @app.get/post 装饰器之后，否则会贪婪匹配盖住 REST 路由。
-app.mount("/", _mcp_asgi)   # 内部路由 /mcp （新协议 Streamable-HTTP）
-app.mount("/", _mcp_sse)    # 内部路由 /sse + /messages/ （旧协议 SSE）
+# 路径安排：
+# - _mcp_asgi (streamable-http)：内部路径 /mcp，挂根 "/" → 对外 /mcp
+# - _mcp_sse (SSE)：            内部路径 /（已在 mcp_server.py 改掉默认 /sse）+ /messages/，
+#   挂到 "/sse" → 对外 /sse 和 /sse/messages/
+# 两个必须放在所有 @app.get/post 之后，否则会贪婪匹配盖住 REST 路由。
+# 两个 mount 不能同前缀：Starlette 后挂的会覆盖前挂的。
+app.mount("/sse", _mcp_sse)   # 旧 SSE 协议（兼容 workbuddy 等老客户端）
+app.mount("/", _mcp_asgi)     # 新 Streamable-HTTP 协议（推荐）；放最后一个，根路径的 fallback
